@@ -1,3 +1,5 @@
+const fs = require('fs');
+
 // Configuration
 const NAME = process.env.NAME;
 const QUEUE_URL = process.env.QUEUE_URL;
@@ -62,8 +64,16 @@ const notify = async payload => {
 // Resource handle
 const spawnJob = async (name) => {
     notify({started: name});
-    const tasks = fs.readdirSync(TASK_PATH);
-    console.log(tasks);
+    const tasks = fs.readdirSync(TASK_PATH).filter(x => /^task-[0-9]{2}\.json$/.test(x));
+
+    for(i = 0 ; i < tasks.length ; ++i) {
+        const task = tasks[i];
+        const body = JSON.parse(fs.readFileSync(task));
+        console.log(body);
+        const create = await k8s.apis.apps.v1.namespaces('default').jobs.post({ body });
+        console.log(create);
+        console.log(`running task ${task}`);
+    }
 };
 
 const resourceUpdated = res => async ({ identifier, url }) => {
