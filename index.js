@@ -1,21 +1,32 @@
 // Configuration
-const NAME = process.env.NAME || 'job1';
-const QUEUE_URL = process.env.QUEUE_URL || 'localhost:4444';
-const STORAGE_URL = process.env.STORAGE_URL || 'http://localhost:3000';
-const RESOURCES = process.env.RESOURCES || 'home-manager';
-const PIPELINE = process.env.PIPELINE || 'pipeline';
-const DATA_DIR = process.env.DATA_DIR || `/tmp/${PIPELINE}/job/${NAME}`
-const JOB = process.env.JOB || '{"name":"job1"}'
+const NAME = process.env.NAME;
+const QUEUE_URL = process.env.QUEUE_URL;
+const STORAGE_URL = process.env.STORAGE_URL;
+const RESOURCES = process.env.RESOURCES;
 
-// Imports
-/*
-const request = require('request'),
-      path = require('path'),
-      mkdirp = require('mkdirp'),
-      fs = require('fs'),
-      compressing = require('compressing'),
-      rimraf = require('rimraf');
-*/
+if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.job-scheduler\.[0-9a-zA-Z\-\_]+$/.test(NAME)) {
+    console.error(`NAME=${NAME}: bad name`);
+    process.exit(1);
+}
+
+if(!QUEUE_URL) {
+    console.error(`QUEUE_URL=${QUEUE_URL}`);
+    process.exit(1);
+}
+
+if(!STORAGE_URL) {
+    console.error(`STORAGE_URL=${STORAGE_URL}`);
+    process.exit(1);
+}
+
+RESOURCES.split(':').map(x => {
+    if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.resource\.[0-9a-zA-Z\-\_]+$/.test(x)) {
+        console.error(`RESOURCES=${RESOURCES}: bad format`);
+        process.exit(1);
+    }
+});
+
+const [ , pipeline, , job ] = NAME.split('.');
 
 // Connections
 const k8s = new (require('kubernetes-client').Client)({ version: '1.13' });
@@ -32,80 +43,32 @@ nats.publish = (topic, payload) => {
 Object.fromEntries = l => l.reduce((a, [k,v]) => ({...a, [k]: v}), {});
 Object.allValuesNotNull = l => Object.values(l).reduce((a, v) => a && (v!=null), true);
 
-/*
-const resourcePath = identifier =>
-    path.join(DATA_DIR, `resource/${identifier}.tar.gz`);
-
-const resourcePathDecompressed = res =>
-    path.join(DATA_DIR, `resource/${res}`)
-*/
-// Identifiers
-const id = {
-    job: `${PIPELINE}.job.${NAME}`
-};
-
 // Initial state
-const job = JSON.parse(JOB);
 var resources = Object.fromEntries(RESOURCES.split(':').map(x => [x, null]));
 
 const notify = async payload => {
     await Promise.all(Object.entries(resources).map(
-        async ([res, { identifier, url }]) => {
-            const topic = `${PIPELINE}.resource.${res}`
-            const pl = {identifier, url, ...payload};
-            nats.publish(topic, pl);
-        }
+        async ([res, { identifier, url }]) => nats.publish(name, {identifier, url, ...payload})
     ));
 };
 
 
 // Resource handle
-const spawnJob = async () => {
-    notify({started: id.job});
-    /*
-    const extract = async () => {
-        await Promise.all(Object.entries(resources).map(
-            async ([res, { identifier }]) => {
-                const filename = resourcePath(identifier);
-                const dir = resourcePathDecompressed(res);
-                if(fs.existsSync(dir)) {
-                    rimraf.sync(dir);
-                }
-                await mkdirp(dir);
-                await compressing.tgz.uncompress(filename, dir);
-                console.log(`decompressed ${filename} to ${dir}`);
-            }
-        ));
-    };
-
-    await extract();
-    console.log(JSON.stringify(job));
-    */
+const spawnJob = async (name) => {
+    notify({started: name});
 };
 
 const resourceUpdated = res => async ({ identifier, url }) => {
-    /*
-    const download = () => new Promise((resolve, reject) => {
-        console.log({identifier, url});
-        const filename = resourcePath(identifier);
-        const dl = () => request.get(url).pipe(fs.createWriteStream(filename))
-            .on('close',  () => resolve(filename))
-            .on('error', err => reject(err));
-        mkdirp(path.dirname(filename)).then(dl).catch(reject);
-    });
-    */
     if(!resources[res] || resources[res].identifier != identifier) {
         resources[res] = { identifier, url };
         if(Object.allValuesNotNull(resources)) {
-            await spawnJob();
+            await spawnJob(res);
         }
     }
 };
 
 // Subscriptions
-Object.keys(resources).map(res => {
-    nats.subscribe(`${PIPELINE}.resource.${res}`, resourceUpdated(res));
-});
+Object.keys(resources).map(res => nats.subscribe(res, resourceUpdated(res)));
 
 //nc.publish(`${PIPELINE}/job/${NAME}`, { status: 'started' });
 
