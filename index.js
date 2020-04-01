@@ -5,12 +5,14 @@ const STORAGE_URL = process.env.STORAGE_URL || 'http://localhost:3000';
 const RESOURCES = process.env.RESOURCES || 'home-manager';
 const PIPELINE = process.env.PIPELINE || 'pipeline';
 const DATA_DIR = process.env.DATA_DIR || `/tmp/${PIPELINE}/${NAME}`
+const JOB = process.env.JOB || '{"name":"job1"}'
 
 // Imports
 const request = require('request'),
       path = require('path'),
       mkdirp = require('mkdirp'),
-      fs = require('fs');
+      fs = require('fs'),
+      compressing = require('compressing');
 
 // Connections
 const k8s = new (require('kubernetes-client').Client)({ version: '1.13' });
@@ -20,15 +22,37 @@ const nats = require('nats').connect(QUEUE_URL, { json: true });
 Object.fromEntries = l => l.reduce((a, [k,v]) => ({...a, [k]: v}), {});
 Object.allValuesNotNull = l => Object.values(l).reduce((a, v) => a && (v!=null), true);
 
+const resourcePath = identifier => path.join(DATA_DIR, `res/${identifier}.tar.gz`);
+const resourcePathDecompressed = identifier => path.join(DATA_DIR, `res/${identifier}`)
+
 // Initial state
+const job = JSON.parse(JOB);
 var resources = Object.fromEntries(RESOURCES.split(':').map(x => [x, null]));
 
 // Resource handle
+const spawnJob = async () => {
+
+    const extract = async () => {
+        Object.entries(resources).map(async ([res, { identifier }]) => {
+            const filename = resourcePath(identifier);
+            const dir = resourcePathDecompressed(identifier);
+            if(!fs.existsSync(dir)) {
+                await mkdirp(dir);
+                await compressing.tgz.uncompress(filename, dir);
+            }
+            console.log(dir)
+        });
+    };
+
+    await extract();
+    console.log(JSON.stringify(job));
+};
+
 const resourceUpdated = res => async ({ identifier, url }) => {
 
     const download = () => new Promise((resolve, reject) => {
         console.log({identifier, url});
-        const filename = path.join(DATA_DIR, `res/${identifier}.tar.gz`);
+        const filename = resourcePath(identifier);
         const dl = () => request.get(url).pipe(fs.createWriteStream(filename))
             .on('close',  () => resolve(filename))
             .on('error', err => reject(err));
@@ -39,7 +63,7 @@ const resourceUpdated = res => async ({ identifier, url }) => {
         const filename = await download();
         resources[res] = { identifier, filename };
         if(Object.allValuesNotNull(resources)) {
-            console.log('rebuild');
+            await spawnJob();
         }
     }
 };
