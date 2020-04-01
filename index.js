@@ -16,24 +16,31 @@ const request = require('request'),
 const k8s = new (require('kubernetes-client').Client)({ version: '1.13' });
 const nats = require('nats').connect(QUEUE_URL, { json: true });
 
+// Common functions
+Object.fromEntries = l => l.reduce((a, [k,v]) => ({...a, [k]: v}), {});
+Object.allValuesNotNull = l => Object.values(l).reduce((a, v) => a && (v!=null), true);
+
 // Initial state
-Object.fromEntries = l => l.reduce((a, [k,v]) => ({...a, [k]: v}), {})
 var resources = Object.fromEntries(RESOURCES.split(':').map(x => [x, null]));
 
 // Resource handle
-const download = (identifier, url) => new Promise((resolve, reject) => {
-    console.log({identifier, url});
-    const filename = path.join(DATA_DIR, `res/${identifier}.tar.gz`);
-    const dl = () => request.get(url).pipe(fs.createWriteStream(filename))
-        .on('close',  () => resolve(filename))
-        .on('error', err => reject(err));
-    mkdirp(path.dirname(filename)).then(dl).catch(reject);
-});
-
 const resourceUpdated = res => async ({ identifier, url }) => {
+
+    const download = () => new Promise((resolve, reject) => {
+        console.log({identifier, url});
+        const filename = path.join(DATA_DIR, `res/${identifier}.tar.gz`);
+        const dl = () => request.get(url).pipe(fs.createWriteStream(filename))
+            .on('close',  () => resolve(filename))
+            .on('error', err => reject(err));
+        mkdirp(path.dirname(filename)).then(dl).catch(reject);
+    });
+
     if(!resources[res] || resources[res].identifier != identifier) {
-        const filename = await download(identifier, url);
+        const filename = await download();
         resources[res] = { identifier, filename };
+        if(Object.allValuesNotNull(resources)) {
+            console.log('rebuild');
+        }
     }
 };
 
