@@ -3,6 +3,7 @@ const NAME = process.env.NAME;
 const QUEUE_URL = process.env.QUEUE_URL;
 const STORAGE_URL = process.env.STORAGE_URL;
 const RESOURCES = process.env.RESOURCES;
+const TASK_PATH = process.env.TASK_PATH;
 
 if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.job-scheduler\.[0-9a-zA-Z\-\_]+$/.test(NAME)) {
     console.error(`NAME=${NAME}: bad name`);
@@ -26,6 +27,11 @@ RESOURCES.split(':').map(x => {
     }
 });
 
+if(!fs.lstatSync(TASK_PATH).isDirectory()) {
+    console.error(`TASK_PATH=${TASK_PATH}: not a directory`);
+    process.exit(1);
+}
+
 const [ , pipeline, , job ] = NAME.split('.');
 
 // Connections
@@ -48,7 +54,7 @@ var resources = Object.fromEntries(RESOURCES.split(':').map(x => [x, null]));
 
 const notify = async payload => {
     await Promise.all(Object.entries(resources).map(
-        async ([res, { identifier, url }]) => nats.publish(name, {identifier, url, ...payload})
+        async ([res, { identifier, url }]) => nats.publish(res, {identifier, url, ...payload})
     ));
 };
 
@@ -56,6 +62,8 @@ const notify = async payload => {
 // Resource handle
 const spawnJob = async (name) => {
     notify({started: name});
+    const tasks = fs.readdirSync(TASK_PATH);
+    console.log(tasks);
 };
 
 const resourceUpdated = res => async ({ identifier, url }) => {
