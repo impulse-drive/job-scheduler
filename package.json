@@ -7,10 +7,12 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "async-redis": "^1.1.7",
     "compressing": "^1.5.0",
     "kubernetes-client": "^8.3.6",
     "mkdirp": "^1.0.3",
     "nats": "^1.4.8",
+    "redis": "^3.0.2",
     "rimraf": "^3.0.2"
   }
 }
