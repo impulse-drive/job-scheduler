@@ -1,181 +1,119 @@
+const cfg = require('./config');
 const fs = require('fs');
-const path = require('path');
-const { promisify } = require('util');
+const redis = require('async-redis').createClient({ host: cfg.redis.host, port: cfg.redis.port });
+const nats = require('nats').connect(cfg.queue.url, { json: true });
 
-// Configuration
-const NAME = process.env.NAME;
-const QUEUE_URL = process.env.QUEUE_URL;
-const STORAGE_URL = process.env.STORAGE_URL;
-const RESOURCES = process.env.RESOURCES;
-const TASK_PATH = process.env.TASK_PATH;
-const REDIS_HOST = process.env.REDIS_HOST;
-const REDIS_PORT = process.env.REDIS_PORT;
+const fromEntries = l => l.reduce((a, [k,v]) => ({...a, [k]: v}), {});
+const zip = (a, b) => a.map((k, i) => [k, b[i]]);
 
-if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.job-scheduler\.[0-9a-zA-Z\-\_]+$/.test(NAME)) {
-    console.error(`NAME=${NAME}: bad name`);
-    process.exit(1);
-}
+// Load tasks from file
+//const tasks = JSON.parse(fs.readFileSync(cfg.tasks.path));
 
-if(!QUEUE_URL) {
-    console.error(`QUEUE_URL=${QUEUE_URL}`);
-    process.exit(1);
-}
+// This function atomically updates the resources cache given the update object,
+// it returns the new updated cache, and whether or not any changes were actually
+// made.
+const updateCache = async (update = {}) => new Promise((resolve, reject) => {
+    var multi = redis.multi();
 
-if(!STORAGE_URL) {
-    console.error(`STORAGE_URL=${STORAGE_URL}`);
-    process.exit(1);
-}
+    multi = cfg.resources.reduce((multi, res) => multi.hgetall(`${cfg.name}.${res}`), multi);
+    const l0 = multi.queue.length;
 
-if(!REDIS_HOST) {
-    console.error(`REDIS_HOST=${REDIS_HOST}`);
-    process.exit(1);
-}
+    multi = cfg.resources.reduce((multi, res) => {
+        return Object.keys(update[res] || {})
+            .reduce((multi, field) => multi.hset(`${cfg.name}.${res}`, field, update[res][field]), multi);
+    }, multi);
+    const l1 = multi.queue.length - l0;
 
-if(!REDIS_PORT) {
-    console.log(`REDIS_PORT=${REDIS_PORT}`);
-    process.exit(1);
-}
+    multi = cfg.resources.reduce((multi, res) => multi.hgetall(`${cfg.name}.${res}`), multi);
+    const l2 = multi.queue.length - l1 - l0;
 
-RESOURCES.split(':').map(x => {
-    if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.resource\.[0-9a-zA-Z\-\_]+$/.test(x)) {
-        console.error(`RESOURCES=${RESOURCES}: bad format`);
-        process.exit(1);
-    }
-});
-/*
-if(!fs.lstatSync(TASK_PATH).isFile()) {
-    console.error(`TASK_PATH=${TASK_PATH}: not a file`);
-    process.exit(1);
-}
-*/
-
-// Connections
-const nats = require('nats').connect(QUEUE_URL, { json: true });
-/*
-nats._publish = nats.publish;
-nats.publish = (topic, payload) => {
-    console.log({[topic]: payload});
-    nats._publish(topic, payload);
-};
-*/
-
-const redis = require('async-redis').createClient({ host: REDIS_HOST, port: REDIS_PORT });
-
-redis.on('error', error => {
-    console.error(error);
-    process.exit(1);
+    multi.exec((error, result) => {
+        if(error) {
+            reject(error);
+        }
+        const pre = fromEntries(zip(cfg.resources, result.slice(0,-l1-l2).map(r => r || {})));
+        const cache = fromEntries(zip(cfg.resources, result.slice(l0 + l1).map(r => r || {})));
+        const unchanged = JSON.stringify(pre) === JSON.stringify(cache);
+        resolve({ changed: !unchanged, cache });
+    });
 });
 
-// Common functions
-Object.fromEntries = l => l.reduce((a, [k,v]) => ({...a, [k]: v}), {});
-Object.allValuesNotNull = l => Object.values(l).reduce((a, v) => a && (v!=null), true);
+// Gets a new build number and updates the cache with the details of every resource entering
+// the build.
+const updateBuildCache = async (cache) => new Promise((resolve, reject) => {
+    redis.incr(`${cfg.name}.build`)
+        .then((build) => {
+            var multi = cfg.resources.reduce((multi, res) => {
+                return Object.keys(cache[res])
+                    .reduce((muli, field) => multi.hset(`${cfg.name}.build.${build}.${res}`, field, cache[res][field]), multi);
+            }, redis.multi());
+            const skip = multi.queue.length;
 
-// Initial state
-const [ , pipeline, , job ] = NAME.split('.');
-const tasks = JSON.parse(fs.readFileSync(TASK_PATH));
-const jobName = `pipeline.${pipeline}.job.${job}`;
-const resources = RESOURCES.split(':');
+            multi = cfg.resources.reduce((multi, res) => multi.hgetall(`${cfg.name}.build.${build}.${res}`), multi);
+
+            multi.exec((error, result) => {
+                if(error) {
+                    return reject(error);
+                }
+
+                resolve({
+                    build,
+                    resources: fromEntries(zip(cfg.resources, result.slice(skip).map(r => r || {})))
+                });
+            });
+        })
+        .catch((error) => {
+            reject(error);
+        });
+});
 
 
-// State lookup
-const getCommits = async () => {
-    return Object.fromEntries(await Promise.all(resources.map(async res => {
-        return await redis.get(`${jobName}.${res}.commit`).then(id => [res, id])
-    })));
-};
+const resourceUpdated = res => async ({ identifier, bucket, object }) => {
+    const check = (cache) => cfg.resources.reduce((acc, res) => {
+        return acc && cache[res] && cache[res].identifier && cache[res].bucket && cache[res].object;
+    }, true);
 
-const getUrls = async () => {
-    return Object.fromEntries(await Promise.all(resources.map(async res => {
-        return await redis.get(`${jobName}.${res}.url`).then(id => [res, id])
-    })));
-};
-
-const getBuild = async () => {
-
-};
-
-pipeline.impulse-drive.job.job1.resource.pipeline-master.build.5 = {
-    commit: 'deadbeef',
-    bucket: 'cache',
-    object: 'deadbeef.tgz',
-}
-
-pipeline.impulse-drive.job.job1.resource.pipeline-master.commit = {
-    commit: 'deadbeef',
-    bucket: 'cache',
-    object: 'deadbeef.tgz'
-}
-
-pipeline.impulse-drive.job.job1.build.5 = {
-    result: 'pending',
-    resource: {
-        pipeline-master: {
-            commit: 'deadbeef',
-            bucket: 'cache',
-            object: 'deadbeef.tgz'
+    if(!identifier || !bucket || !object) {
+        console.error(`invalid message`);
+        console.error(JSON.stringify({ identifier, bucket, object }));
+        return;
     }
-}
 
-const setCommit = async (res, id) => {
-    await redis.set(`${jobName}.${res}.commit`,  id);
+    const { changed, cache } = await updateCache({ [res]: { identifier, bucket, object } });
+
+    if(changed && check(cache)) {
+        await updateBuildCache(cache).then(startBuild);
+    }
 };
 
-const setUrl = async (res, url) => {
-    await redis.set(`${jobName}.${res}.url`, url);
-};
-
-const getBuild = async () => {
-    return await redis.incr(jobName);
-};
-
-// Resource handle
-const spawnJob = async (build) => {
-    const urls = await getUrls();
-    const inputUrls = Object.fromEntries(Object.entries(urls).map(([k,v]) => [k.split('.').slice(-1)[0], v]));
+const startBuild = async (build) => {
     for(i = 0 ; i < tasks.length ; ++i) {
-        console.log(`spawning task: ${tasks[i]}`);
         const task = tasks[i];
-        const taskName = `${jobName}.task.${task.name}`;
-        const outputUrl = `${STORAGE_URL}/${taskName.replace(/\./g, '/')}/${build}.tar.gz`;
+        console.log(`spawning task: ${task}`);
         const promise = new Promise((resolve, reject) => {
-            const subject = `${taskName}.start`;
-            const data = { ...task, build, outputUrl, inputUrls };
+            const subject = `${cfg.name}.task.${task.name}.start`;
             const options = { max: 1 };
+            const data = {
+                ...task,
+                ...build,
+                output: {
+                    bucket: cfg.minio.bucket,
+                    object: `${cfg.name}.task.${task.name}.build.${build.build}`
+                }
+            };
             nats.request(subject, data, options, ({status}) => {
-                if(status === 'failed') {
+                if(status == 'failed') {
                     return reject(status);
                 }
                 return resolve(status);
             });
         });
-        const status = await promise.catch(status => {
-            nats.publish(jobName, { build, status: 'failed' });
-            console.log(`task ${taskName} failed`);
-            console.log(`job ${jboName} failed`);
+        await promise.catch((status) => {
+            nats.publish(cfg.name, { build: build.build, status: 'failed' });
             throw status;
         });
-        console.log(`task ${taskName} succeeded`);
     }
-    nats.publish(jobName, { build, status: 'succeeded' });
-    console.log(`job ${jobName} succeeded`);
-
+    nats.publish(cfg.name, { build: build.build, status: 'succeeded' });
 };
 
-const resourceUpdated = res => async ({ identifier, url, force }) => {
-    const commits = await getCommits();
-    if(!commits[res] || commits[res] != identifier || force) {
-        await setCommit(res, identifier);
-        await setUrl(res, url);
-        if(!Object.values(commits).includes(null)) {
-            getBuild().then(async build => {
-                await spawnJob(build);
-            });
-        }
-    }
-};
-
-// Subscriptions
-resources.map(res => nats.subscribe(res, resourceUpdated(res)));
-
-console.log(tasks);
-
+cfg.resources.map(res => nats.subscribe(res, resourceUpdated(res)));
