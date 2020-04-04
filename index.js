@@ -51,11 +51,13 @@ if(!fs.lstatSync(TASK_PATH).isFile()) {
 
 // Connections
 const nats = require('nats').connect(QUEUE_URL, { json: true });
+/*
 nats._publish = nats.publish;
 nats.publish = (topic, payload) => {
     console.log({[topic]: payload});
     nats._publish(topic, payload);
 };
+*/
 
 const redis = require('async-redis').createClient({ host: REDIS_HOST, port: REDIS_PORT });
 
@@ -88,6 +90,31 @@ const getUrls = async () => {
     })));
 };
 
+const getBuild = async () => {
+
+};
+
+pipeline.impulse-drive.job.job1.resource.pipeline-master.build.5 = {
+    commit: 'deadbeef',
+    bucket: 'cache',
+    object: 'deadbeef.tgz',
+}
+
+pipeline.impulse-drive.job.job1.resource.pipeline-master.commit = {
+    commit: 'deadbeef',
+    bucket: 'cache',
+    object: 'deadbeef.tgz'
+}
+
+pipeline.impulse-drive.job.job1.build.5 = {
+    result: 'pending',
+    resource: {
+        pipeline-master: {
+            commit: 'deadbeef',
+            bucket: 'cache',
+            object: 'deadbeef.tgz'
+    }
+}
 
 const setCommit = async (res, id) => {
     await redis.set(`${jobName}.${res}.commit`,  id);
